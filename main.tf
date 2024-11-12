@@ -1,8 +1,8 @@
 # Specify the provider
 provider "aws" {
   region     = "ap-southeast-1"
-  access_key = "SECRET"
-  secret_key = "SECRET"
+  access_key = "rahasia"
+  secret_key = "rahasia"
 }
 
 # Backend configuration for state storage
@@ -11,8 +11,8 @@ terraform {
     bucket      = "hsn-terra"
     key         = "path/to/terraform.tfstate"
     region      = "ap-southeast-1"
-    access_key  = "SECRET"
-    secret_key  = "SECRET"
+    access_key  = "rahasia"
+    secret_key  = "rahasia"
   }
 }
 
@@ -103,7 +103,37 @@ resource "aws_security_group" "instance_sg" {
   }
 }
 
-# Launch template for the autoscaling group
+# IAM Role for EC2 instances with SSM access
+resource "aws_iam_role" "ec2_ssm_role" {
+  name = "ec2-ssm-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action    = "sts:AssumeRole"
+        Effect    = "Allow"
+        Principal = {
+          Service = "ec2.amazonaws.com"
+        }
+      }
+    ]
+  })
+}
+
+# Attach the SSM policy to the IAM role
+resource "aws_iam_role_policy_attachment" "ssm_policy" {
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+  role       = aws_iam_role.ec2_ssm_role.name
+}
+
+# Instance Profile to attach IAM Role to EC2
+resource "aws_iam_instance_profile" "ec2_ssm_profile" {
+  name = "ec2-ssm-profile"
+  role = aws_iam_role.ec2_ssm_role.name
+}
+
+# Launch template with updated SSM agent installation commands
 resource "aws_launch_template" "asg_template" {
   name_prefix       = "asg-template"
   image_id          = "ami-0acbb557db23991cc"  # Replace with a valid AMI ID
@@ -114,6 +144,30 @@ resource "aws_launch_template" "asg_template" {
     security_groups             = [aws_security_group.instance_sg.id]
     associate_public_ip_address = false
   }
+
+  # Attach IAM instance profile
+  iam_instance_profile {
+    name = aws_iam_instance_profile.ec2_ssm_profile.name
+  }
+
+  # Updated User Data to install SSM Agent
+  user_data = base64encode(<<-EOF
+              #!/bin/bash
+              # Create a new user
+              useradd -m newuser
+
+              # Set a password for the new user
+              echo "newuser:rahasia" | chpasswd
+
+              # Add the user to the sudo group (optional)
+              usermod -aG sudo newuser
+
+              # Install SSM Agent using wget and dpkg
+              wget https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/debian_amd64/amazon-ssm-agent.deb
+              sudo dpkg -i amazon-ssm-agent.deb
+              sudo systemctl enable amazon-ssm-agent
+              EOF
+  )
 
   lifecycle {
     create_before_destroy = true
@@ -144,9 +198,6 @@ resource "aws_autoscaling_group" "asg" {
     value               = "autoscaling-instance"
     propagate_at_launch = true
   }
-
-  # Scaling policy based on average CPU utilization
-  target_group_arns = []
 }
 
 # Autoscaling Policy for CPU utilization
@@ -163,7 +214,7 @@ resource "aws_autoscaling_policy" "cpu_scale_up" {
   }
 }
 
-# CloudWatch alarms for monitoring
+# CloudWatch alarms
 resource "aws_cloudwatch_metric_alarm" "cpu_utilization" {
   alarm_name          = "HighCPUUtilization"
   comparison_operator = "GreaterThanOrEqualToThreshold"
@@ -177,50 +228,5 @@ resource "aws_cloudwatch_metric_alarm" "cpu_utilization" {
 
   dimensions = {
     AutoScalingGroupName = aws_autoscaling_group.asg.name
-  }
-}
-
-resource "aws_cloudwatch_metric_alarm" "memory_usage" {
-  alarm_name          = "HighMemoryUsage"
-  comparison_operator = "GreaterThanOrEqualToThreshold"
-  evaluation_periods  = 1
-  metric_name         = "MemoryUtilization"
-  namespace           = "System/Linux"
-  period              = 300
-  statistic           = "Average"
-  threshold           = 80.0
-
-  dimensions = {
-    InstanceId = aws_launch_template.asg_template.id
-  }
-}
-
-resource "aws_cloudwatch_metric_alarm" "status_check_failed" {
-  alarm_name          = "StatusCheckFailed"
-  comparison_operator = "GreaterThanOrEqualToThreshold"
-  evaluation_periods  = 1
-  metric_name         = "StatusCheckFailed"
-  namespace           = "AWS/EC2"
-  period              = 300
-  statistic           = "Average"
-  threshold           = 1.0
-
-  dimensions = {
-    InstanceId = aws_launch_template.asg_template.id
-  }
-}
-
-resource "aws_cloudwatch_metric_alarm" "network_in_out" {
-  alarm_name          = "HighNetworkUsage"
-  comparison_operator = "GreaterThanOrEqualToThreshold"
-  evaluation_periods  = 1
-  metric_name         = "NetworkIn"
-  namespace           = "AWS/EC2"
-  period              = 300
-  statistic           = "Average"
-  threshold           = 1000000.0 # Adjust as necessary
-
-  dimensions = {
-    InstanceId = aws_launch_template.asg_template.id
   }
 }
